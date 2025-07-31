@@ -7,7 +7,8 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TRANSFORMERS_CACHE=/app/models \
-    NLTK_DATA=/app/nltk_data
+    NLTK_DATA=/app/nltk_data \
+    PORT=8080
 
 # Install system dependencies - combined in one RUN to reduce layers
 RUN apt-get update && \
@@ -35,7 +36,7 @@ COPY download_models.py .
 # Download models with optimized settings
 RUN python download_models.py && \
     # Create a cloud run specific main file
-    echo 'import uvicorn\nfrom app.app import app\n\nif __name__ == "__main__":\n    uvicorn.run(app, host="0.0.0.0", port=int(8080))' > main_cloud_run.py
+    echo 'import uvicorn\nimport os\nfrom app.app import app\n\nif __name__ == "__main__":\n    port = int(os.environ.get("PORT", 8080))\n    uvicorn.run(app, host="0.0.0.0", port=port)' > main_cloud_run.py
 
 # Expose port
 EXPOSE 8080
