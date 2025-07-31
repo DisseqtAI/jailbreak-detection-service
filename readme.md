@@ -15,6 +15,7 @@ A sophisticated system for detecting whether Large Language Model (LLM) response
 - 🐳 **Containerization**: Docker support for easy deployment
 - ☁️ **Cloud-Ready**: GitHub Actions workflow for AWS ECR deployment
 
+
 ## Project Structure
 
 ```
