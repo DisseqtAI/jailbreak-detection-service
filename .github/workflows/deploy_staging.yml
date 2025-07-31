@@ -155,7 +155,7 @@ jobs:
             --service-account github-actions@staging-466807.iam.gserviceaccount.com \
             --set-env-vars "ENVIRONMENT=staging,API_AUTH_TOKEN=${{ secrets.API_AUTH_TOKEN }}" \
             --labels "env=staging,commit_sha=${GITHUB_SHA},tag=${UNIQUE_TAG}" \
-            ${{ github.event.inputs.public_access == 'true' && '--allow-unauthenticated' || '--no-allow-unauthenticated' }}
+            --allow-unauthenticated
           
           SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --platform managed --region ${REGION} --format="value(status.url)")
           echo "Deployed service URL: ${SERVICE_URL}"
