@@ -1,0 +1,261 @@
+name: Deploy to Google Cloud Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag for the Docker image'
+        required: true
+        default: 'latest'
+      dockerfile:
+        description: 'Dockerfile to use (e.g., Dockerfile.gcp)'
+        required: true
+        default: 'Dockerfile.gcp'
+        type: choice
+        options:
+          - Dockerfile.gcp
+          - Dockerfile
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+          - development
+      memory:
+        description: 'Memory allocation for Cloud Run service (in Gi)'
+        required: true
+        default: '8'
+        type: choice
+        options:
+          - '2'
+          - '4'
+          - '8'
+          - '16'
+          - '32'
+      cpu:
+        description: 'CPU allocation for Cloud Run service'
+        required: true
+        default: '4'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '4'
+          - '8'
+      min_instances:
+        description: 'Minimum number of instances'
+        required: true
+        default: '2'
+      max_instances:
+        description: 'Maximum number of instances'
+        required: true
+        default: '10'
+      concurrency:
+        description: 'Number of concurrent requests per instance'
+        required: true
+        default: '80'
+      timeout:
+        description: 'Request timeout in seconds'
+        required: true
+        default: '300'
+      public_access:
+        description: 'Allow unauthenticated access'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  SERVICE_NAME: ${{ secrets.GCP_SERVICE_NAME }}
+  REGION: ${{ secrets.GCP_REGION }}
+
+jobs:
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+
+    # Add concurrency to ensure only one deployment runs at a time per environment
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.inputs.environment }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      id-token: write  # Needed for auth with Google Cloud
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Setup authentication to Google Cloud
+      - id: 'auth'
+        name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # Install the gcloud CLI
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Configure Docker to use gcloud credentials
+      - name: Configure Docker for GCP Artifact Registry
+        run: |
+          gcloud auth configure-docker gcr.io
+
+      # Build and push the Docker image
+      - name: Build and push Docker image
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          DOCKERFILE: ${{ github.event.inputs.dockerfile }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          # Add build timestamp and git commit hash as labels
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          COMMIT_SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          
+          # Add a unique tag for this build using timestamp and git commit
+          UNIQUE_TAG="${ENVIRONMENT}-${SHORT_SHA}-$(date +%s)"
+          
+          # Final image name with all tags
+          IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+          
+          echo "Building Docker image with Dockerfile: ${DOCKERFILE}"
+          echo "Environment: ${ENVIRONMENT}"
+          echo "Image tag: ${IMAGE_TAG}"
+          echo "Unique tag: ${UNIQUE_TAG}"
+          
+          # Build the Docker image with platform specified for Cloud Run (amd64)
+          docker build \
+            --platform linux/amd64 \
+            --build-arg BUILD_DATE="${BUILD_DATE}" \
+            --build-arg VCS_REF="${COMMIT_SHA}" \
+            --build-arg VERSION="${IMAGE_TAG}" \
+            --build-arg ENVIRONMENT="${ENVIRONMENT}" \
+            -t ${IMAGE_NAME}:${IMAGE_TAG} \
+            -t ${IMAGE_NAME}:${ENVIRONMENT} \
+            -t ${IMAGE_NAME}:${UNIQUE_TAG} \
+            -f ${DOCKERFILE} .
+          
+          # Push all tags to Google Container Registry
+          docker push ${IMAGE_NAME}:${IMAGE_TAG}
+          docker push ${IMAGE_NAME}:${ENVIRONMENT}
+          docker push ${IMAGE_NAME}:${UNIQUE_TAG}
+          
+          # Save the image URI for deployment
+          echo "IMAGE_URI=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "UNIQUE_TAG=${UNIQUE_TAG}" >> $GITHUB_ENV
+
+      # Deploy to Cloud Run
+      - name: Deploy to Cloud Run
+        env:
+          MEMORY: ${{ github.event.inputs.memory }}
+          CPU: ${{ github.event.inputs.cpu }}
+          MIN_INSTANCES: ${{ github.event.inputs.min_instances }}
+          MAX_INSTANCES: ${{ github.event.inputs.max_instances }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency }}
+          TIMEOUT: ${{ github.event.inputs.timeout }}
+          PUBLIC_ACCESS: ${{ github.event.inputs.public_access }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Deploying to Cloud Run: ${SERVICE_NAME}-${ENVIRONMENT}"
+          
+          # Deploy to Cloud Run
+          gcloud run deploy ${SERVICE_NAME}-${ENVIRONMENT} \
+            --image ${IMAGE_URI} \
+            --platform managed \
+            --region ${REGION} \
+            --memory ${MEMORY}Gi \
+            --cpu ${CPU} \
+            --min-instances ${MIN_INSTANCES} \
+            --max-instances ${MAX_INSTANCES} \
+            --concurrency ${CONCURRENCY} \
+            --timeout ${TIMEOUT}s \
+            --set-env-vars "ENVIRONMENT=${ENVIRONMENT},API_AUTH_TOKEN=${{ secrets.API_AUTH_TOKEN }}" \
+            --labels "env=${ENVIRONMENT},commit_sha=${GITHUB_SHA},tag=${UNIQUE_TAG}" \
+            ${{ github.event.inputs.public_access == 'true' && '--allow-unauthenticated' || '--no-allow-unauthenticated' }}
+          
+          # Get service URL
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME}-${ENVIRONMENT} --platform managed --region ${REGION} --format="value(status.url)")
+          echo "Deployed service URL: ${SERVICE_URL}"
+          echo "SERVICE_URL=${SERVICE_URL}" >> $GITHUB_ENV
+
+      # Configure IAM policy if public access enabled
+      - name: Configure IAM policy for public access
+        if: ${{ github.event.inputs.public_access == 'true' }}
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Setting IAM policy to allow public access..."
+          gcloud run services add-iam-policy-binding ${SERVICE_NAME}-${ENVIRONMENT} \
+            --region=${REGION} \
+            --member="allUsers" \
+            --role="roles/run.invoker"
+
+      # Test the deployment
+      - name: Test Deployment
+        run: |
+          echo "Testing deployment health endpoint..."
+          
+          # Try to access health endpoint (with retry)
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          HTTP_STATUS=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ $HTTP_STATUS -ne 200 ]; do
+            echo "Attempt $((RETRY_COUNT+1)) of ${MAX_RETRIES}..."
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${SERVICE_URL}/health || echo "failed")
+            
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Health check successful!"
+              break
+            else
+              echo "Health check returned status: $HTTP_STATUS"
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              echo "Waiting 10 seconds before next attempt..."
+              sleep 10
+            fi
+          done
+          
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Health check failed after ${MAX_RETRIES} attempts."
+            exit 1
+          fi
+
+      # Create/update deployment artifacts
+      - name: Create deployment record
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          DEPLOY_INFO=$(cat << EOF
+          {
+            "service": "${SERVICE_NAME}",
+            "environment": "${ENVIRONMENT}",
+            "region": "${REGION}",
+            "image": "${IMAGE_URI}",
+            "url": "${SERVICE_URL}",
+            "deployed_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "deployed_by": "${{ github.actor }}",
+            "github_sha": "${{ github.sha }}",
+            "github_ref": "${{ github.ref }}",
+            "github_workflow": "${{ github.workflow }}"
+          }
+          EOF
+          )
+          
+          echo "$DEPLOY_INFO" > deployment-${ENVIRONMENT}.json
+          echo "Deployment record created:"
+          cat deployment-${ENVIRONMENT}.json
+
+      # Upload deployment record as an artifact
+      - name: Upload deployment record
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ github.event.inputs.environment }}
+          path: deployment-${{ github.event.inputs.environment }}.json
+          retention-days: 90 

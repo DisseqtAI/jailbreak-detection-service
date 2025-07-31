@@ -1,0 +1,48 @@
+# Step 1: Use the official AWS Lambda Python base image for Python 3.10
+FROM public.ecr.aws/lambda/python:3.10
+
+# Step 2: Set the working directory inside the container
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+# Step 3: Copy the application code and requirements file into the container
+COPY ./app ${LAMBDA_TASK_ROOT}/app
+COPY ./detector.py ${LAMBDA_TASK_ROOT}/detector.py
+COPY ./download_models.py ${LAMBDA_TASK_ROOT}/download_models.py
+COPY ./requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
+
+# Step 4: Install system dependencies for building native extensions
+RUN yum install -y gcc
+
+# Step 5: Install Python dependencies from requirements.txt
+# Temporarily exclude spacy to handle compatibility issues
+RUN grep -v "spacy" requirements.txt > requirements_no_spacy.txt && \
+    pip install --no-cache-dir -r requirements_no_spacy.txt
+
+# Step 6: Install NLTK data to a Lambda-compatible location
+RUN mkdir -p /tmp/nltk_data && \
+    NLTK_DATA=/tmp/nltk_data python -c "import nltk; nltk.download('punkt', download_dir='/tmp/nltk_data'); nltk.download('stopwords', download_dir='/tmp/nltk_data'); nltk.download('wordnet', download_dir='/tmp/nltk_data')"
+
+# Step 7: Install Spacy and its model separately to resolve compatibility issues
+RUN pip install --no-cache-dir spacy==3.6.1 && \
+    pip install --no-cache-dir numpy --force-reinstall && \
+    pip install --no-cache-dir https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.6.0/en_core_web_sm-3.6.0-py3-none-any.whl
+
+# Step 8: Install Mangum for Lambda/API Gateway integration
+RUN pip install --no-cache-dir mangum
+
+# Step 9: Pre-download the Hugging Face models and cache them
+# Set a flag for the download_models.py script to know it's running in Docker
+RUN touch /.dockerenv && \
+    mkdir -p /tmp/cache/models/hf/bart-large-mnli /tmp/cache/models/hf/roberta-rejection && \
+    chmod -R 777 /tmp/cache && \
+    TRANSFORMERS_CACHE=/tmp/cache python ${LAMBDA_TASK_ROOT}/download_models.py && \
+    echo "🚀 Ready for AWS Lambda deployment"
+
+# Step 10: Set up environment variables
+ENV TRANSFORMERS_CACHE=/tmp/cache \
+    NLTK_DATA=/tmp/nltk_data \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Step 11: Set the CMD to your handler
+CMD ["app.app.handler"] 
