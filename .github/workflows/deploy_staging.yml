@@ -152,6 +152,7 @@ jobs:
             --max-instances ${MAX_INSTANCES} \
             --concurrency ${CONCURRENCY} \
             --timeout ${TIMEOUT}s \
+            --service-account github-actions@staging-466807.iam.gserviceaccount.com \
             --set-env-vars "ENVIRONMENT=staging,API_AUTH_TOKEN=${{ secrets.API_AUTH_TOKEN }}" \
             --labels "env=staging,commit_sha=${GITHUB_SHA},tag=${UNIQUE_TAG}" \
             ${{ github.event.inputs.public_access == 'true' && '--allow-unauthenticated' || '--no-allow-unauthenticated' }}
