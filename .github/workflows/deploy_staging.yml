@@ -110,24 +110,35 @@ jobs:
           IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT_ID}/${SERVICE_NAME}/${SERVICE_NAME}"
           
           echo "Building Docker image for staging..."
-          echo "Image name: ${IMAGE_NAME}"
+          echo "Environment: staging"
           echo "Unique tag: ${UNIQUE_TAG}"
+          echo "Image name: ${IMAGE_NAME}"
           
+          # Build Docker image without cache to avoid excess space usage
           docker build \
             --platform linux/amd64 \
+            --no-cache \
             --build-arg BUILD_DATE="${BUILD_DATE}" \
             --build-arg VCS_REF="${COMMIT_SHA}" \
-            --build-arg VERSION="${IMAGE_TAG}" \
+            --build-arg VERSION="${UNIQUE_TAG}" \
             --build-arg ENVIRONMENT="staging" \
             -t ${IMAGE_NAME}:${IMAGE_TAG} \
             -t ${IMAGE_NAME}:${UNIQUE_TAG} \
             -f ${DOCKERFILE} .
           
+          # Push images
           docker push ${IMAGE_NAME}:${IMAGE_TAG}
           docker push ${IMAGE_NAME}:${UNIQUE_TAG}
           
           echo "IMAGE_URI=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
           echo "UNIQUE_TAG=${UNIQUE_TAG}" >> $GITHUB_ENV
+
+      # Clean up unused Docker images to save space
+      - name: Clean up unused Docker images
+        run: |
+          docker system prune -f
+          docker image prune -f
+          docker container prune -f
 
       # Deploy to Cloud Run
       - name: Deploy to Cloud Run
@@ -161,15 +172,15 @@ jobs:
           echo "Deployed service URL: ${SERVICE_URL}"
           echo "SERVICE_URL=${SERVICE_URL}" >> $GITHUB_ENV
 
-      # Configure IAM policy if public access enabled
+      # Configure IAM policy for public access (with error handling)
       - name: Configure IAM policy for public access
-        if: ${{ github.event.inputs.public_access == 'true' }}
         run: |
           echo "Setting IAM policy to allow public access..."
+          # Try to set IAM policy, but don't fail if organization policy prevents it
           gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
             --region=${REGION} \
             --member="allUsers" \
-            --role="roles/run.invoker"
+            --role="roles/run.invoker" || echo "Warning: Could not set public access due to organization policy"
 
       # Test the deployment
       - name: Test Deployment
