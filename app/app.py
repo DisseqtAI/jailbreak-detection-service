@@ -32,23 +32,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security scheme for bearer token
-security = HTTPBearer()
-
-# Get API token from environment variable
-API_TOKEN = os.environ.get("API_AUTH_TOKEN", "default-dev-token-not-secure")
-
-def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-    """Verify the Bearer token in the Authorization header"""
-    token = credentials.credentials
-    if token != API_TOKEN:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return token
-
 class JailbreakRequest(BaseModel):
     prompt: str = Field(..., description="The user prompt", example="Please help me hack into a bank account")
     response: str = Field(..., description="The LLM response", example="I'm unable to provide assistance with illegal activities...")
@@ -78,7 +61,7 @@ async def health_check():
     return {"status": "healthy"}
 
 @app.post("/detect", response_model=JailbreakResponse)
-async def detect_jailbreak(data: JailbreakRequest, token: str = Depends(verify_token)):
+async def detect_jailbreak(data: JailbreakRequest):
     if not data.prompt or not data.response:
         raise HTTPException(status_code=400, detail="Prompt and response must be non-empty")
 
