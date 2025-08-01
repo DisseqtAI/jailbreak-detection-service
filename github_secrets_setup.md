@@ -24,7 +24,7 @@ Value: us-central1
 ### **2. GCP Authentication**
 ```
 Name: GCP_WORKLOAD_IDENTITY_PROVIDER
-Value: projects/153234750524/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
+Value: projects/153234750524/locations/global/workloadIdentityPools/github-actions/providers/github
 ```
 
 ```

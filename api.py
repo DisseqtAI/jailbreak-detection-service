@@ -1,8 +1,9 @@
 # api.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
+import os
 from detector import classify_jailbreak, hf_detect_denial_response, holistic_detect_rejection, calculate_fusion_score
 
 # Initialize FastAPI app
@@ -20,6 +21,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# API Key configuration
+API_KEY = os.environ.get("API_KEY", "jailbreak-api-key-2025-secure")
+
+def verify_api_key(x_api_key: str = Header(None)):
+    """Verify API key from X-API-Key header"""
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="API key required. Include X-API-Key header.")
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return x_api_key
 
 class JailbreakRequest(BaseModel):
     prompt: str = Field(..., description="The user prompt", example="Please help me hack into a bank account")
@@ -50,7 +62,7 @@ async def health_check():
     return {"status": "healthy"}
 
 @app.post("/detect", response_model=JailbreakResponse)
-async def detect_jailbreak(data: JailbreakRequest):
+async def detect_jailbreak(data: JailbreakRequest, api_key: str = Depends(verify_api_key)):
     if not data.prompt or not data.response:
         raise HTTPException(status_code=400, detail="Prompt and response must be non-empty")
 
