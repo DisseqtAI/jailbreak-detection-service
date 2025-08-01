@@ -1,4 +1,4 @@
-name: Deploy to Staging Cloud Run
+name: Deploy to Google Cloud Run
 
 on:
   workflow_dispatch:
@@ -6,15 +6,24 @@ on:
       image_tag:
         description: 'Tag for the Docker image'
         required: true
-        default: 'staging'
+        default: 'latest'
       dockerfile:
-        description: 'Dockerfile to use'
+        description: 'Dockerfile to use (e.g., Dockerfile.gcp)'
         required: true
         default: 'Dockerfile.gcp'
         type: choice
         options:
           - Dockerfile.gcp
           - Dockerfile
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - production
+          - staging
+          - development
       memory:
         description: 'Memory allocation for Cloud Run service (in Gi)'
         required: true
@@ -43,7 +52,7 @@ on:
       max_instances:
         description: 'Maximum number of instances'
         required: true
-        default: '10'
+        default: '4'
       concurrency:
         description: 'Number of concurrent requests per instance'
         required: true
@@ -59,17 +68,18 @@ on:
         type: boolean
 
 env:
-  PROJECT_ID: staging-466807
-  SERVICE_NAME: jailbreak-detection-service
-  REGION: us-central1
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  SERVICE_NAME: ${{ secrets.GCP_SERVICE_NAME }}
+  REGION: ${{ secrets.GCP_REGION }}
 
 jobs:
   deploy:
-    name: Deploy to Staging Cloud Run
+    name: Deploy to Cloud Run
     runs-on: ubuntu-latest
 
+    # Add concurrency to ensure only one deployment runs at a time per environment
     concurrency:
-      group: staging-deployment
+      group: ${{ github.workflow }}-${{ github.event.inputs.environment }}
       cancel-in-progress: false
 
     permissions:
@@ -93,43 +103,51 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       # Configure Docker to use gcloud credentials
-      - name: Configure Docker for GCP Artifact Registry
+      - name: Configure Docker for GCP Container Registry
         run: |
-          gcloud auth configure-docker ${REGION}-docker.pkg.dev
+          gcloud auth configure-docker gcr.io
 
       # Build and push the Docker image
       - name: Build and push Docker image
         env:
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
           DOCKERFILE: ${{ github.event.inputs.dockerfile }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
         run: |
+          # Add build timestamp and git commit hash as labels
           BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           COMMIT_SHA=$(git rev-parse HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
-          UNIQUE_TAG="staging-${SHORT_SHA}-$(date +%s)"
-          IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT_ID}/${SERVICE_NAME}/${SERVICE_NAME}"
           
-          echo "Building Docker image for staging..."
-          echo "Environment: staging"
+          # Add a unique tag for this build using timestamp and git commit
+          UNIQUE_TAG="${ENVIRONMENT}-${SHORT_SHA}-$(date +%s)"
+          
+          # Final image name with all tags
+          IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+          
+          echo "Building Docker image with Dockerfile: ${DOCKERFILE}"
+          echo "Environment: ${ENVIRONMENT}"
+          echo "Image tag: ${IMAGE_TAG}"
           echo "Unique tag: ${UNIQUE_TAG}"
-          echo "Image name: ${IMAGE_NAME}"
           
-          # Build Docker image without cache to avoid excess space usage
+          # Build the Docker image with platform specified for Cloud Run (amd64)
           docker build \
             --platform linux/amd64 \
-            --no-cache \
             --build-arg BUILD_DATE="${BUILD_DATE}" \
             --build-arg VCS_REF="${COMMIT_SHA}" \
-            --build-arg VERSION="${UNIQUE_TAG}" \
-            --build-arg ENVIRONMENT="staging" \
+            --build-arg VERSION="${IMAGE_TAG}" \
+            --build-arg ENVIRONMENT="${ENVIRONMENT}" \
             -t ${IMAGE_NAME}:${IMAGE_TAG} \
+            -t ${IMAGE_NAME}:${ENVIRONMENT} \
             -t ${IMAGE_NAME}:${UNIQUE_TAG} \
             -f ${DOCKERFILE} .
           
-          # Push images
+          # Push all tags to Google Container Registry
           docker push ${IMAGE_NAME}:${IMAGE_TAG}
+          docker push ${IMAGE_NAME}:${ENVIRONMENT}
           docker push ${IMAGE_NAME}:${UNIQUE_TAG}
           
+          # Save the image URI for deployment
           echo "IMAGE_URI=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
           echo "UNIQUE_TAG=${UNIQUE_TAG}" >> $GITHUB_ENV
 
@@ -150,10 +168,12 @@ jobs:
           CONCURRENCY: ${{ github.event.inputs.concurrency }}
           TIMEOUT: ${{ github.event.inputs.timeout }}
           PUBLIC_ACCESS: ${{ github.event.inputs.public_access }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
         run: |
-          echo "Deploying to Cloud Run: ${SERVICE_NAME}"
+          echo "Deploying to Cloud Run: ${SERVICE_NAME}-${ENVIRONMENT}"
           
-          gcloud run deploy ${SERVICE_NAME} \
+          # Deploy to Cloud Run
+          gcloud run deploy ${SERVICE_NAME}-${ENVIRONMENT} \
             --image ${IMAGE_URI} \
             --platform managed \
             --region ${REGION} \
@@ -163,37 +183,33 @@ jobs:
             --max-instances ${MAX_INSTANCES} \
             --concurrency ${CONCURRENCY} \
             --timeout ${TIMEOUT}s \
-            --service-account github-actions@staging-466807.iam.gserviceaccount.com \
-            --set-env-vars "ENVIRONMENT=staging" \
-            --labels "env=staging,commit_sha=${GITHUB_SHA},tag=${UNIQUE_TAG}" \
-            --allow-unauthenticated
+            --set-env-vars "ENVIRONMENT=${ENVIRONMENT}" \
+            --labels "env=${ENVIRONMENT},commit_sha=${GITHUB_SHA},tag=${UNIQUE_TAG}" \
+            ${{ github.event.inputs.public_access == 'true' && '--allow-unauthenticated' || '--no-allow-unauthenticated' }}
           
-          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --platform managed --region ${REGION} --format="value(status.url)")
+          # Get service URL
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME}-${ENVIRONMENT} --platform managed --region ${REGION} --format="value(status.url)")
           echo "Deployed service URL: ${SERVICE_URL}"
           echo "SERVICE_URL=${SERVICE_URL}" >> $GITHUB_ENV
 
-      # Configure IAM policy for public access (with error handling)
+      # Configure IAM policy if public access enabled
       - name: Configure IAM policy for public access
+        if: ${{ github.event.inputs.public_access == 'true' }}
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
         run: |
           echo "Setting IAM policy to allow public access..."
-          # Try to set IAM policy, but don't fail if organization policy prevents it
-          gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
+          gcloud run services add-iam-policy-binding ${SERVICE_NAME}-${ENVIRONMENT} \
             --region=${REGION} \
             --member="allUsers" \
-            --role="roles/run.invoker" || echo "Warning: Could not set public access due to organization policy"
+            --role="roles/run.invoker"
 
       # Test the deployment
       - name: Test Deployment
         run: |
-          echo "Testing deployment endpoints..."
+          echo "Testing deployment health endpoint..."
           
-          # Try to access root endpoint first (no auth required)
-          echo "Testing root endpoint..."
-          ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${SERVICE_URL}/ || echo "failed")
-          echo "Root endpoint status: $ROOT_STATUS"
-          
-          # Try to access health endpoint (no auth required)
-          echo "Testing health endpoint..."
+          # Try to access health endpoint (with retry)
           MAX_RETRIES=5
           RETRY_COUNT=0
           HTTP_STATUS=0
@@ -215,19 +231,18 @@ jobs:
           
           if [ "$HTTP_STATUS" != "200" ]; then
             echo "Health check failed after ${MAX_RETRIES} attempts."
-            echo "Note: This might be due to organization policies preventing public access."
-            echo "The service is deployed successfully but requires authentication."
-            # Don't fail the deployment for this
-            exit 0
+            exit 1
           fi
 
-      # Create deployment record
+      # Create/update deployment artifacts
       - name: Create deployment record
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
         run: |
           DEPLOY_INFO=$(cat << EOF
           {
             "service": "${SERVICE_NAME}",
-            "environment": "staging",
+            "environment": "${ENVIRONMENT}",
             "region": "${REGION}",
             "image": "${IMAGE_URI}",
             "url": "${SERVICE_URL}",
@@ -240,14 +255,14 @@ jobs:
           EOF
           )
           
-          echo "$DEPLOY_INFO" > deployment-staging.json
+          echo "$DEPLOY_INFO" > deployment-${ENVIRONMENT}.json
           echo "Deployment record created:"
-          cat deployment-staging.json
+          cat deployment-${ENVIRONMENT}.json
 
       # Upload deployment record as an artifact
       - name: Upload deployment record
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-staging
-          path: deployment-staging.json
+          name: deployment-${{ github.event.inputs.environment }}
+          path: deployment-${{ github.event.inputs.environment }}.json
           retention-days: 90 

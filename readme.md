@@ -21,7 +21,7 @@ A sophisticated system for detecting whether Large Language Model (LLM) response
 ```
 jailbreaking/
 │
-├── main.py                    # CLI for individual prompt/response testing
+
 ├── detector.py                # Core detection algorithms and models
 ├── api.py                     # FastAPI implementation
 ├── download_models.py         # Script to download required ML models
@@ -74,7 +74,10 @@ jailbreaking/
 Test individual prompts and responses:
 
 ```bash
-python main.py
+# Use the API instead
+python -m uvicorn api:app --host 0.0.0.0 --port 8000
+# Or use the startup script
+./start_api.sh
 ```
 
 You will be prompted to enter a prompt and an LLM response.
